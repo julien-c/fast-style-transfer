@@ -7,9 +7,16 @@ from utils import save_img, get_img, exists, list_files
 from argparse import ArgumentParser
 from collections import defaultdict
 import time
+from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
+
+
 
 BATCH_SIZE = 4
-DEVICE = '/gpu:0'
+# DEVICE = '/gpu:0'
+DEVICE = '/cpu:0'
+
+PORT_NUMBER = os.getenv('PORT_NUMBER', 8000)
+
 
 # get img_shape
 def ffwd(data_in, paths_out, checkpoint_dir, device_t='/gpu:0', batch_size=4):
@@ -27,8 +34,8 @@ def ffwd(data_in, paths_out, checkpoint_dir, device_t='/gpu:0', batch_size=4):
     curr_num = 0
     soft_config = tf.ConfigProto(allow_soft_placement=True)
     soft_config.gpu_options.allow_growth = True
-    with g.as_default(), g.device(device_t), \
-            tf.Session(config=soft_config) as sess:
+    with g.as_default(), g.device(device_t), tf.Session(config=soft_config) as sess:
+    
         batch_shape = (batch_size,) + img_shape
         img_placeholder = tf.placeholder(tf.float32, shape=batch_shape,
                                          name='img_placeholder')
@@ -70,12 +77,17 @@ def ffwd(data_in, paths_out, checkpoint_dir, device_t='/gpu:0', batch_size=4):
         ffwd(remaining_in, remaining_out, checkpoint_dir, 
             device_t=device_t, batch_size=1)
 
+
+
+
 def ffwd_to_img(in_path, out_path, checkpoint_dir, device='/cpu:0'):
     paths_in, paths_out = [in_path], [out_path]
     ffwd(paths_in, paths_out, checkpoint_dir, batch_size=1, device_t=device)
 
-def ffwd_different_dimensions(in_path, out_path, checkpoint_dir, 
-            device_t=DEVICE, batch_size=4):
+
+
+
+def ffwd_different_dimensions(in_path, out_path, checkpoint_dir, device_t=DEVICE, batch_size=4):
     in_path_of_shape = defaultdict(list)
     out_path_of_shape = defaultdict(list)
     for i in range(len(in_path)):
@@ -88,6 +100,9 @@ def ffwd_different_dimensions(in_path, out_path, checkpoint_dir,
         print('Processing images of shape %s' % shape)
         ffwd(in_path_of_shape[shape], out_path_of_shape[shape], 
             checkpoint_dir, device_t, batch_size)
+
+
+
 
 def build_parser():
     parser = ArgumentParser()
@@ -151,5 +166,100 @@ def main():
             ffwd(full_in, full_out, opts.checkpoint_dir, device_t=opts.device,
                     batch_size=opts.batch_size)
 
+
+######################
+##
+####
+
+def prismafy(data_in, paths_out, checkpoint_dir, device_t=DEVICE, batch_size=1):
+    print "ppis"
+    assert len(paths_out) > 0
+    is_paths = type(data_in[0]) == str
+    if is_paths:
+        assert len(data_in) == len(paths_out)
+        img_shape = get_img(data_in[0]).shape
+    else:
+        assert data_in.size[0] == len(paths_out)
+        img_shape = X[0].shape
+
+    g = tf.Graph()
+    curr_num = 0
+    soft_config = tf.ConfigProto(allow_soft_placement=True)
+    soft_config.gpu_options.allow_growth = True
+    with g.as_default(), g.device(device_t), tf.Session(config=soft_config) as sess:
+    
+        batch_shape = (batch_size,) + img_shape
+        img_placeholder = tf.placeholder(tf.float32, shape=batch_shape,
+                                         name='img_placeholder')
+
+        preds = transform.net(img_placeholder)
+        saver = tf.train.Saver()
+        if os.path.isdir(checkpoint_dir):
+            ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
+            if ckpt and ckpt.model_checkpoint_path:
+                saver.restore(sess, ckpt.model_checkpoint_path)
+            else:
+                raise Exception("No checkpoint found...")
+        else:
+            saver.restore(sess, checkpoint_dir)
+
+        num_iters = int(len(paths_out)/batch_size)
+        for i in range(num_iters):
+            pos = i * batch_size
+            curr_batch_out = paths_out[pos:pos+batch_size]
+            if is_paths:
+                curr_batch_in = data_in[pos:pos+batch_size]
+                X = np.zeros(batch_shape, dtype=np.float32)
+                for j, path_in in enumerate(curr_batch_in):
+                    img = get_img(path_in)
+                    assert img.shape == img_shape, \
+                        'Images have different dimensions. ' +  \
+                        'Resize images or use --allow-different-dimensions.'
+                    X[j] = img
+            else:
+                X = data_in[pos:pos+batch_size]
+
+            _preds = sess.run(preds, feed_dict={img_placeholder:X})
+            for j, path_out in enumerate(curr_batch_out):
+                save_img(path_out, _preds[j])
+                
+        remaining_in = data_in[num_iters*batch_size:]
+        remaining_out = paths_out[num_iters*batch_size:]
+    if len(remaining_in) > 0:
+        print "ARGOOS"
+        ffwd(remaining_in, remaining_out, checkpoint_dir, 
+            device_t=device_t, batch_size=1)
+    return "BITE"
+
+
+
+
+
+class PrismafyHttpHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        start = time.time()
+        if self.path != "/prismafy":
+            self.send_response(404)
+            return
+        # Ok let's do this.
+        
+        print prismafy(["/Users/gibbon/devel/fast-style-transfer/1481063241172.jpeg"], ["/Users/gibbon/devel/fast-style-transfer/out.jpg"], "/Users/gibbon/devel/fast-style-transfer/models/udnie.ckpt")
+        
+        self.send_response(200)
+        self.send_header("X-Time-Tagger", time.time() - start)
+        self.end_headers()
+        self.wfile.write("Booyah")
+
+
+
 if __name__ == '__main__':
-    main()
+    # main()
+    server_address = ('', PORT_NUMBER)
+    httpd = HTTPServer(server_address, PrismafyHttpHandler)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    httpd.server_close()
+
+
